@@ -132,6 +132,47 @@ How to use a git backend::
 
 The URL fragment (``#next`` here) indicates which backend branch is used.
 
+Nix-friendly URLs
+=================
+
+The native spelling ``gcrypt::<backend>`` is unchanged.  An alternative
+``gcrypt://`` spelling is also accepted, because ``gcrypt::`` cannot be
+written in a Nix fetcher URL without escaping and because Nix consumes
+``#`` as a flake ref.  The alternative form is rewritten to the native
+backend spelling before any other processing::
+
+    gcrypt:///absolute/path          -> /absolute/path
+    gcrypt://host/path               -> ssh://host/path
+    gcrypt://user@host/path          -> ssh://user@host/path
+    gcrypt://host:port/path          -> ssh://host:port/path
+    gcrypt://host/path?gcrypt-branch=next -> ssh://host/path#next
+
+The local backend is selected by an absolute path (``gcrypt:///path``);
+anything of the form ``[user@]host[:port]/path`` is treated as the git
+backend over ssh.  Relative and bare ``gcrypt://host`` URLs are rejected
+with an error rather than guessed at.
+
+Because Nix uses ``#...`` for flake references, use the query parameter
+``?gcrypt-branch=<branch>`` to select a backend branch::
+
+    git clone "gcrypt://example.com/repo?gcrypt-branch=next"
+
+A literal ``#fragment`` in a ``gcrypt://`` URL is still honoured with its
+native meaning (the backend branch for the git backend, a separate
+manifest file for the local/rsync/sftp backends), and supplying both a
+fragment and ``gcrypt-branch=`` is an error.
+
+Nix integration
+...............
+
+``pkgs.fetchgit`` (and any Nix path that shells out to ``git``) will use
+this helper if ``git-remote-gcrypt`` is on ``PATH``; setting
+``GIT_DIR``/``GIT_WORK_TREE`` or running from a temporary directory is
+supported.  ``builtins.fetchGit`` and git flake inputs use ``libgit2``,
+which does not invoke remote helpers, so they cannot use any gcrypt
+remote, with either URL spelling.  Use ``fetchgit`` with the helper on
+``PATH``, or fetch with a plain ``git`` invocation, in that case.
+
 Notes
 =====
 

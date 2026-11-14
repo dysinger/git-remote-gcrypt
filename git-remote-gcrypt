@@ -80,6 +80,94 @@ pipefail()
 isurl() { isnull "${2%%$1://*}"; }
 islocalrepo() { isnull "${1##/*}" && [ ! -e "$1/HEAD" ]; }
 
+# Translate the Nix-friendly `gcrypt://...` spelling into the native backend
+# spelling that the rest of this script already understands.
+#
+# Git invokes us with the URL exactly as it appears after `gcrypt::` for the
+# native form, so `gcrypt::/path` arrives here as `/path`.  The alternative
+# form is not stripped by git, so it arrives as `gcrypt://...` and has to be
+# rewritten in place.  Rewriting here (rather than re-execing) means an
+# internal invocation with a native backend can never recurse back into this
+# function: after translation the URL is a plain path or ssh:// URL, which
+# git handles with its built-in transports.
+#
+#   gcrypt:///abs/path              -> /abs/path
+#   gcrypt://host/path              -> ssh://host/path
+#   gcrypt://user@host/path         -> ssh://user@host/path
+#   gcrypt://host:port/path         -> ssh://host:port/path
+#   gcrypt://host/path?gcrypt-branch=next -> ssh://host/path#next
+#   gcrypt://host/path#next         -> ssh://host/path#next  (native fragment)
+#
+# The query parameter exists because Nix consumes `#...` as a flake ref, so
+# it can never be used to select a gcrypt branch in a flake input.  A native
+# `#fragment` is still honoured (and is what a local backend uses to pick a
+# separate manifest file), but it is an error to supply both spellings.
+translate_nix_url()
+{
+	local t_orig= t_rest= t_frag= t_query= t_pair= t_url=
+
+	iseq "${URL%%gcrypt://*}" "" || return 0
+
+	t_orig=$URL
+	t_rest=${URL#gcrypt://}
+	isnonnull "$t_rest" ||
+		echo_die "gcrypt: empty alternative URL '$URL'"
+
+	case "$t_rest" in
+	*\#*)
+		t_frag=${t_rest#*\#}
+		t_rest=${t_rest%%\#*}
+		;;
+	esac
+
+	case "$t_rest" in
+	*\?*)
+		t_query=${t_rest#*\?}
+		t_rest=${t_rest%%\?*}
+		;;
+	esac
+
+	if isnonnull "$t_query"
+	then
+		for t_pair in $(xecho_n "$t_query" | tr '&' ' ')
+		do
+			case "$t_pair" in
+			gcrypt-branch=*)
+				isnull "$t_frag" ||
+					echo_die "gcrypt: '$t_orig' has both a #fragment and gcrypt-branch=; use only one"
+				t_frag=${t_pair#gcrypt-branch=}
+				isnonnull "$t_frag" ||
+					echo_die "gcrypt: empty gcrypt-branch= in '$t_orig'"
+				;;
+			*)
+				echo_die "gcrypt: unsupported query parameter '$t_pair' in '$t_orig' (only gcrypt-branch= is recognised)"
+				;;
+			esac
+		done
+	fi
+
+	case "$t_rest" in
+	/*)
+		t_url=$t_rest
+		;;
+	*/*)
+		t_url="ssh://$t_rest"
+		;;
+	*)
+		echo_die "gcrypt: '$t_orig' is neither an absolute local path (gcrypt:///path) nor host/path"
+		;;
+	esac
+
+	isnull "$t_frag" || t_url="$t_url#$t_frag"
+
+	URL=$t_url
+	# When git is called with a URL instead of a configured remote it passes
+	# the URL as the remote name too.  The rest of the script detects that by
+	# comparing the name against the (now translated) URL.
+	iseq "$NAME" "$t_orig" && NAME=$URL
+	return 0
+}
+
 xgrep() { command grep "$@" || : ; }
 
 # setvar is used for named return variables
@@ -901,6 +989,8 @@ gcrypt_main_loop()
 	NAME=$1  # Remote name
 	URL=$2   # Remote URL
 
+	translate_nix_url
+
 	setup
 
 	while read input_
@@ -957,6 +1047,7 @@ if [ "x$1" = x--check ]
 then
 	NAME=dummy-gcrypt-check
 	URL=$2
+	translate_nix_url
 	setup
 	ensure_connected
 	git remote remove $NAME 2>/dev/null || true
